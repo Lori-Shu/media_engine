@@ -21,14 +21,16 @@ use tokio::{
 use crate::decode_engine::{TinyDecoder, TinyDecoderArgs};
 mod decode_engine;
 pub(crate) type PlayerResult<T> = anyhow::Result<T>;
+/// Main type for high level interface.
 pub struct MediaEngine {
     tokio_runtime: Runtime,
-    tiny_decoder: Arc<RwLock<TinyDecoder>>,
+    tiny_decoder: RwLock<TinyDecoder>,
     media_source_info: RwLock<Option<MediaSourceInfo>>,
     pub realtime_status: RealtimeStatus,
     pub background_tasks_notifies: BackgroundTasksNotifies,
 }
 impl MediaEngine {
+    /// Construct an engine without specifing a source.
     pub fn new() -> anyhow::Result<Arc<Self>> {
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -52,7 +54,7 @@ impl MediaEngine {
             .current_video_timestamp(current_video_timestamp.clone())
             .demux_eof_flag(demux_eof_flag.clone())
             .build();
-        let tiny_decoder = Arc::new(RwLock::new(TinyDecoder::new(tiny_decoder_creation_args)?));
+        let tiny_decoder = RwLock::new(TinyDecoder::new(tiny_decoder_creation_args)?);
         let realtime_status = RealtimeStatus {
             media_source_flag,
             audio_frame_recv: audio_frame_cache_queue.1,
@@ -72,6 +74,7 @@ impl MediaEngine {
             background_tasks_notifies,
         }))
     }
+    /// Retrieve the source information, if not specified, returns Err.
     pub fn media_source_info(&self) -> anyhow::Result<MediaSourceInfo> {
         let media_source_info = self.media_source_info.blocking_read();
         if let Some(info) = &*media_source_info {
@@ -80,6 +83,7 @@ impl MediaEngine {
             Err(anyhow::Error::msg("no source has been loaded"))
         }
     }
+    /// Specify an input source.
     pub fn reset_input(&self, path: &Path) -> anyhow::Result<()> {
         self.tokio_runtime.block_on(async {
             let mut decoder = self.tiny_decoder.write().await;
@@ -91,6 +95,7 @@ impl MediaEngine {
             }
         })
     }
+    /// Seek a specified time by timestamp.
     pub fn seek_timestamp(&self, ts: i64) {
         self.tokio_runtime.block_on(async {
             let decoder = self.tiny_decoder.read().await;
@@ -105,6 +110,7 @@ pub struct StreamExistenceFlags {
     pub video: bool,
     pub audio: bool,
 }
+/// For constructing gpu transcoders.
 #[derive(Clone)]
 pub struct TranscoderArgs {
     pub colorspace: Space,
@@ -113,6 +119,7 @@ pub struct TranscoderArgs {
     pub width: u32,
     pub height: u32,
 }
+/// Shared realtime states.
 pub struct RealtimeStatus {
     pub media_source_flag: Arc<AtomicBool>,
     pub audio_frame_recv: Receiver<Audio>,
@@ -120,10 +127,12 @@ pub struct RealtimeStatus {
     pub demux_eof_flag: Arc<AtomicBool>,
     pub hardware_config_flag: Arc<AtomicBool>,
 }
+/// Notifies for waking background tasks.
 pub struct BackgroundTasksNotifies {
     pub audio_decode_thread_notify: Arc<Notify>,
     pub video_decode_thread_notify: Arc<Notify>,
 }
+/// Souce information, only exist after calling reset_input.
 #[derive(Clone)]
 pub struct MediaSourceInfo {
     pub transcoder_args: Option<TranscoderArgs>,
