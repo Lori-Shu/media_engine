@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "a media engine for development of media players"
 license = "GPL-2.0"
-repository = "https://github.com/you/my_library"
+repository = "https://github.com/Lori-Shu/media_engine"
 [dependencies]
 ffmpeg-the-third = "6.0.0"
 flume = "0.12.0"
