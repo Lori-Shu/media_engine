@@ -38,22 +38,22 @@ const AUDIO_SAMPLE_RATE: u32 = 48000;
 /// this wrapper type should be protected manually to
 /// keep memory safe in multi threads
 /// means need to wrap an Arc and a Lock to use it in multi threads
-pub struct ManualProtectedInput(ffmpeg_the_third::format::context::Input);
+struct ManualProtectedInput(ffmpeg_the_third::format::context::Input);
 unsafe impl Sync for ManualProtectedInput {}
 /// this wrapper type should be protected manually to
 /// keep memory safe in multi threads
 /// means need to wrap an Arc and a Lock to use it in multi threads
-pub struct ManualProtectedVideoDecoder(ffmpeg_the_third::decoder::Video);
+struct ManualProtectedVideoDecoder(ffmpeg_the_third::decoder::Video);
 unsafe impl Sync for ManualProtectedVideoDecoder {}
 /// this wrapper type should be protected manually to
 /// keep memory safe in multi threads
 /// means need to wrap an Arc and a Lock to use it in multi threads
-pub struct ManualProtectedAudioDecoder(ffmpeg_the_third::decoder::Audio);
+struct ManualProtectedAudioDecoder(ffmpeg_the_third::decoder::Audio);
 unsafe impl Sync for ManualProtectedAudioDecoder {}
 /// this wrapper type should be protected manually to
 /// keep memory safe in multi threads
 /// means need to wrap an Arc and a Lock to use it in multi threads
-pub struct ManualProtectedResampler(pub *mut SwrContext);
+struct ManualProtectedResampler(pub *mut SwrContext);
 unsafe impl Send for ManualProtectedResampler {}
 unsafe impl Sync for ManualProtectedResampler {}
 
@@ -289,7 +289,7 @@ impl TinyDecoder {
                 end_ts = 0;
             }
         }
-        self.end_timestamp = 0;
+        self.end_timestamp = end_ts;
         self.end_time_str(end_ts).await;
 
         if let Some(audio_stream) = audio_stream {

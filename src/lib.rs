@@ -14,7 +14,7 @@ use ffmpeg_the_third::{
 };
 use flume::Receiver;
 use tokio::{
-    runtime::Runtime,
+    runtime::Handle,
     sync::{Notify, RwLock},
 };
 
@@ -23,7 +23,6 @@ mod decode_engine;
 pub(crate) type PlayerResult<T> = anyhow::Result<T>;
 /// Main type for high level interface.
 pub struct MediaEngine {
-    tokio_runtime: Runtime,
     tiny_decoder: RwLock<TinyDecoder>,
     media_source_info: RwLock<Option<MediaSourceInfo>>,
     pub realtime_status: RealtimeStatus,
@@ -31,10 +30,7 @@ pub struct MediaEngine {
 }
 impl MediaEngine {
     /// Construct an engine without specifing a source.
-    pub fn new() -> anyhow::Result<Arc<Self>> {
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
+    pub fn new(handle: Handle) -> anyhow::Result<Arc<Self>> {
         let media_source_flag = Arc::new(AtomicBool::new(false));
         let hardware_config_flag = Arc::new(AtomicBool::new(false));
         let audio_frame_cache_queue = flume::bounded(32);
@@ -44,7 +40,7 @@ impl MediaEngine {
         let current_video_timestamp = Arc::new(AtomicI64::new(0));
         let demux_eof_flag = Arc::new(AtomicBool::new(false));
         let tiny_decoder_creation_args = TinyDecoderArgs::builder()
-            .runtime_handle(tokio_runtime.handle().clone())
+            .runtime_handle(handle)
             .media_source_flag(media_source_flag.clone())
             .hardware_config_flag(hardware_config_flag.clone())
             .audio_frame_cache_queue(audio_frame_cache_queue.clone())
@@ -67,7 +63,6 @@ impl MediaEngine {
             video_decode_thread_notify,
         };
         Ok(Arc::new(Self {
-            tokio_runtime,
             tiny_decoder,
             media_source_info: RwLock::new(None),
             realtime_status,
@@ -75,8 +70,8 @@ impl MediaEngine {
         }))
     }
     /// Retrieve the source information, if not specified, returns Err.
-    pub fn media_source_info(&self) -> anyhow::Result<MediaSourceInfo> {
-        let media_source_info = self.media_source_info.blocking_read();
+    pub async fn media_source_info(&self) -> anyhow::Result<MediaSourceInfo> {
+        let media_source_info = self.media_source_info.read().await;
         if let Some(info) = &*media_source_info {
             Ok(info.clone())
         } else {
@@ -84,23 +79,19 @@ impl MediaEngine {
         }
     }
     /// Specify an input source.
-    pub fn reset_input(&self, path: &Path) -> anyhow::Result<()> {
-        self.tokio_runtime.block_on(async {
-            let mut decoder = self.tiny_decoder.write().await;
-            if let Ok(info) = decoder.reset_input(path).await {
-                *self.media_source_info.write().await = Some(info);
-                Ok(())
-            } else {
-                Err(anyhow::Error::msg("reset input err"))
-            }
-        })
+    pub async fn reset_input(&self, path: &Path) -> anyhow::Result<()> {
+        let mut decoder = self.tiny_decoder.write().await;
+        if let Ok(info) = decoder.reset_input(path).await {
+            *self.media_source_info.write().await = Some(info);
+            Ok(())
+        } else {
+            Err(anyhow::Error::msg("reset input err"))
+        }
     }
     /// Seek a specified time by timestamp.
-    pub fn seek_timestamp(&self, ts: i64) {
-        self.tokio_runtime.block_on(async {
-            let decoder = self.tiny_decoder.read().await;
-            decoder.seek_timestamp_to_decode(ts).await;
-        });
+    pub async fn seek_timestamp(&self, ts: i64) {
+        let decoder = self.tiny_decoder.read().await;
+        decoder.seek_timestamp_to_decode(ts).await;
     }
 }
 /// indicate which stream in the input is chosen as main stream
