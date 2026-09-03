@@ -96,7 +96,7 @@ pub(crate) struct TinyDecoder {
     video_decode_task_handle: Option<JoinHandle<PlayerResult<()>>>,
     audio_decode_task_handle: Option<JoinHandle<PlayerResult<()>>>,
     hardware_config_flag: Arc<AtomicBool>,
-    cover_pic_data: Arc<RwLock<Option<Vec<u8>>>>,
+    cover_pic_data: Option<Vec<u8>>,
     runtime_handle: Handle,
     demux_thread_notify: Arc<Notify>,
     audio_decode_thread_notify: Arc<Notify>,
@@ -140,7 +140,7 @@ impl TinyDecoder {
             video_decode_task_handle: None,
             audio_decode_task_handle: None,
             hardware_config_flag: tiny_decoder_creation_args.hardware_config_flag,
-            cover_pic_data: Arc::new(RwLock::new(None)),
+            cover_pic_data: None,
             runtime_handle: tiny_decoder_creation_args.runtime_handle,
             demux_thread_notify: Arc::new(Notify::new()),
             audio_decode_thread_notify: tiny_decoder_creation_args.audio_decode_thread_notify,
@@ -166,7 +166,7 @@ impl TinyDecoder {
 
         self.audio_time_base = Rational::new(1, 1);
         self.free_swr_ctx_async().await;
-        self.cover_pic_data = Arc::new(RwLock::new(None));
+        self.cover_pic_data = None;
         self.cancellation_token = Arc::new(CancellationToken::new());
         self.video_decode_task_handle = None;
         self.audio_decode_task_handle = None;
@@ -231,6 +231,13 @@ impl TinyDecoder {
         if let Some(stream) = cover_stream {
             info!("cover stream found");
             self.cover_stream_index = stream.0.index();
+            unsafe {
+                let avstream_ptr = stream.0.as_ptr();
+                let data = (*avstream_ptr).attached_pic.data;
+                let slice =
+                    std::slice::from_raw_parts(data, (*avstream_ptr).attached_pic.size as usize);
+                self.cover_pic_data = Some(slice.to_vec());
+            }
         }
 
         if let Some(stream) = &audio_stream {
@@ -421,17 +428,10 @@ impl TinyDecoder {
                 {
                     let audio_stream_idx = demux_context.audio_stream_index;
                     let video_stream_idx = demux_context.video_stream_index;
-                    let cover_index = demux_context.cover_stream_index;
 
                     match res {
                         Ok((stream_idx, packet)) => {
-                            if stream_idx == cover_index {
-                                if let Some(d) = packet.data() {
-                                    let mut cover_pic_data =
-                                        demux_context.cover_image_data.write().await;
-                                    *cover_pic_data = Some(d.to_vec());
-                                }
-                            } else if stream_idx == audio_stream_idx {
+                            if stream_idx == audio_stream_idx {
                                 if demux_context
                                     .audio_packet_sender
                                     .send_async(packet)
@@ -729,8 +729,6 @@ impl TinyDecoder {
             .format_input(self.format_input.clone())
             .audio_packet_sender(self.audio_packet_cache_queue.0.clone())
             .video_packet_sender(self.video_packet_cache_queue.0.clone())
-            .cover_stream_index(self.cover_stream_index)
-            .cover_image_data(self.cover_pic_data.clone())
             .demux_thread_notify(self.demux_thread_notify.clone())
             .cancellation_token(self.cancellation_token.clone())
             .demux_eof_flag(self.demux_eof_flag.clone())
@@ -1041,11 +1039,9 @@ pub(crate) struct TinyDecoderArgs {
 struct DemuxContext {
     audio_stream_index: usize,
     video_stream_index: usize,
-    cover_stream_index: usize,
     format_input: Arc<RwLock<Option<ManualProtectedInput>>>,
     audio_packet_sender: Sender<Packet>,
     video_packet_sender: Sender<Packet>,
-    cover_image_data: Arc<RwLock<Option<Vec<u8>>>>,
     demux_thread_notify: Arc<Notify>,
     cancellation_token: Arc<CancellationToken>,
     demux_eof_flag: Arc<AtomicBool>,
