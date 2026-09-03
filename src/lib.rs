@@ -130,7 +130,7 @@ pub struct MediaSourceInfo {
     pub stream_existence_flags: StreamExistenceFlags,
     pub end_timestamp: i64,
     pub end_time_formatted_string: String,
-    pub cover_pic_data: Arc<RwLock<Option<Vec<u8>>>>,
+    pub cover_pic_data: Option<Vec<u8>>,
     pub resolution_rect: [u32; 2],
     pub audio_time_base: Rational,
     pub video_time_base: Rational,
