@@ -1,10 +1,11 @@
 [package]
 name = "media_engine"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "a media engine for development of media players"
 license = "GPL-2.0"
 repository = "https://github.com/Lori-Shu/media_engine"
+documentation= "https://docs.rs/media_engine/latest/media_engine/"
 [dependencies]
 ffmpeg-the-third = "6.0.0"
 flume = "0.12.0"
