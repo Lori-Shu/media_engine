@@ -231,6 +231,10 @@ impl TinyDecoder {
         if let Some(stream) = cover_stream {
             info!("cover stream found");
             self.cover_stream_index = stream.0.index();
+            // SAFETY:
+            // This unsafe block is promised to be safe because
+            // the inner operations do not alloc extra memory
+            // but only read and copy the memory of attached_pics
             unsafe {
                 let avstream_ptr = stream.0.as_ptr();
                 let data = (*avstream_ptr).attached_pic.data;
@@ -475,6 +479,10 @@ impl TinyDecoder {
         video_frame_tmp: Video,
     ) -> Video {
         if hardware_config.load(std::sync::atomic::Ordering::Acquire) {
+            // SAFETY:
+            // This unsafe block is promised to be safe because
+            // the inner operations do not alloc extra memory
+            // but transfer hardware frame data to standard frame data
             unsafe {
                 let mut transfered_frame = ffmpeg_the_third::frame::Video::empty();
                 if 0 != av_hwframe_transfer_data(
@@ -689,6 +697,10 @@ impl TinyDecoder {
                             resampled_frame.set_rate(AUDIO_SAMPLE_RATE);
                             resampled_frame.set_format(Sample::F32(Type::Packed));
                             resampled_frame.set_pts(audio_frame_tmp.pts());
+                            // SAFETY:
+                            // This unsafe block is promised to be safe because
+                            // the inner operations do not alloc extra memory
+                            // but perform resampling
                             unsafe {
                                 if swr_convert_frame(
                                     resampler.0,
@@ -786,6 +798,10 @@ impl TinyDecoder {
                 self.video_stream_index
             }
         };
+        // SAFETY:
+        // This unsafe block is promised to be safe because
+        // the inner operations do not alloc extra memory
+        // but perform seek operation
         unsafe {
             let mut input = self.format_input.write().await;
             info!("seek timestamp:{}", ts);
@@ -801,20 +817,21 @@ impl TinyDecoder {
                 if res != 0 {
                     info!("seek err num:{res}");
                 }
-                self.audio_packet_cache_queue.1.drain();
-                self.video_packet_cache_queue.1.drain();
-                self.audio_frame_cache_queue.1.drain();
-                self.video_frame_cache_queue.1.drain();
-                self.current_video_timestamp
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
-
-                self.flush_decoders().await;
-                self.demux_eof_flag
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                self.demux_thread_notify.notify_one();
             }
-            info!("seek finished!");
         }
+        self.audio_packet_cache_queue.1.drain();
+        self.video_packet_cache_queue.1.drain();
+        self.audio_frame_cache_queue.1.drain();
+        self.video_frame_cache_queue.1.drain();
+        self.current_video_timestamp
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        self.flush_decoders().await;
+        self.demux_eof_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.demux_thread_notify.notify_one();
+
+        info!("seek finished!");
     }
     /// stop demux and decode
     async fn cancel_process_tasks(&mut self) -> PlayerResult<()> {
@@ -897,6 +914,10 @@ impl TinyDecoder {
         codec_ctx: codec::Context,
     ) -> PlayerResult<ffmpeg_the_third::decoder::Video> {
         let mut decoder = codec_ctx.decoder().video()?;
+        // SAFETY:
+        // This unsafe block is promised to be safe because
+        // the inner operations do not alloc extra memory
+        // but perform enabling hardware acceleration
         unsafe {
             if let Some(codec) = &decoder.codec() {
                 let mut idx = 0;
@@ -947,6 +968,10 @@ impl TinyDecoder {
         audio_decoder: &ffmpeg_the_third::decoder::Audio,
         audio_format: AVSampleFormat,
     ) -> PlayerResult<ManualProtectedResampler> {
+        // SAFETY:
+        // This unsafe block is promised to be safe because
+        // the memory is bound to be freed when calling `reset_input` or
+        // the TinyDecoder is dropped
         unsafe {
             let mut swr_ctx = null_mut();
             let r = swr_alloc_set_opts2(
@@ -973,6 +998,10 @@ impl TinyDecoder {
     fn free_swr_ctx(&self) {
         let mut resampler = self.resampler.blocking_write();
         if let Ok(mut ctx) = resampler.take().context("no resampler") {
+            // SAFETY:
+            // This unsafe block is promised to be safe because
+            // the inner operations do not alloc extra memory
+            // but free the allocated resampler context
             unsafe {
                 swr_free(&mut ctx.0);
             }
@@ -981,6 +1010,10 @@ impl TinyDecoder {
     async fn free_swr_ctx_async(&self) {
         let mut resampler = self.resampler.write().await;
         if let Ok(mut ctx) = resampler.take().context("no resampler") {
+            // SAFETY:
+            // This unsafe block is promised to be safe because
+            // the inner operations do not alloc extra memory
+            // but free the allocated resampler context
             unsafe {
                 swr_free(&mut ctx.0);
             }
@@ -991,6 +1024,10 @@ unsafe extern "C" fn get_format_callback(
     _ctx: *mut AVCodecContext,
     fmt: *const AVPixelFormat,
 ) -> AVPixelFormat {
+    // SAFETY:
+    // This unsafe block is promised to be safe because
+    // the inner operations do not alloc extra memory
+    // but find the expected Vulkan pixel format
     unsafe {
         let mut i = 0;
         while *fmt.add(i) != AVPixelFormat::NONE {
