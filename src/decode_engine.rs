@@ -11,15 +11,9 @@ use std::{
 use anyhow::Context;
 
 use ffmpeg_the_third::{
-    ChannelLayout, Packet, Rational, Stream, codec,
-    ffi::{
-        AV_CHANNEL_LAYOUT_STEREO, AV_NOPTS_VALUE, AVCodecContext, AVHWDeviceType, AVPixelFormat,
-        AVSEEK_FLAG_BACKWARD, AVSampleFormat, SwrContext, av_hwdevice_ctx_create,
-        av_hwframe_transfer_data, avcodec_get_hw_config, swr_alloc_set_opts2, swr_convert_frame,
-        swr_free, swr_init,
-    },
-    format::{Sample, sample::Type, stream::Disposition},
-    frame::{Audio, Video},
+    ChannelLayout, Packet, Rational, Stream, codec, ffi::{
+        AV_CHANNEL_LAYOUT_STEREO, AV_NOPTS_VALUE, AVCodecContext, AVHWDeviceType, AVPixelFormat, AVSEEK_FLAG_BACKWARD, AVSampleFormat, SwrContext, av_frame_copy_props, av_hwdevice_ctx_create, av_hwframe_transfer_data, avcodec_get_hw_config, swr_alloc_set_opts2, swr_convert_frame, swr_free, swr_init,
+    }, format::{Sample, sample::Type, stream::Disposition}, frame::{Audio, Video},
 };
 
 use flume::{Receiver, Sender};
@@ -492,8 +486,7 @@ impl TinyDecoder {
                 ) {
                     warn!("hardware frame transfer to software frame err");
                 }
-
-                transfered_frame.set_pts(video_frame_tmp.pts());
+                av_frame_copy_props(transfered_frame.as_mut_ptr(), video_frame_tmp.as_ptr());
                 return transfered_frame;
             }
         }
@@ -997,7 +990,7 @@ impl TinyDecoder {
     }
     fn free_swr_ctx(&self) {
         let mut resampler = self.resampler.blocking_write();
-        if let Ok(mut ctx) = resampler.take().context("no resampler") {
+        if let Some(mut ctx) = resampler.take() {
             // SAFETY:
             // This unsafe block is promised to be safe because
             // the inner operations do not alloc extra memory
@@ -1009,7 +1002,7 @@ impl TinyDecoder {
     }
     async fn free_swr_ctx_async(&self) {
         let mut resampler = self.resampler.write().await;
-        if let Ok(mut ctx) = resampler.take().context("no resampler") {
+        if let Some(mut ctx) = resampler.take() {
             // SAFETY:
             // This unsafe block is promised to be safe because
             // the inner operations do not alloc extra memory
