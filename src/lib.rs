@@ -1,9 +1,8 @@
+#![deny(unused)]
+#![deny(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 use std::{
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicI64},
-    },
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use ffmpeg_the_third::{
@@ -37,7 +36,6 @@ impl MediaEngine {
         let video_frame_cache_queue = flume::bounded(32);
         let audio_decode_thread_notify = Arc::new(Notify::new());
         let video_decode_thread_notify = Arc::new(Notify::new());
-        let current_video_timestamp = Arc::new(AtomicI64::new(0));
         let demux_eof_flag = Arc::new(AtomicBool::new(false));
         let tiny_decoder_creation_args = TinyDecoderArgs::builder()
             .runtime_handle(handle)
@@ -47,7 +45,6 @@ impl MediaEngine {
             .video_frame_cache_queue(video_frame_cache_queue.clone())
             .audio_decode_thread_notify(audio_decode_thread_notify.clone())
             .video_decode_thread_notify(video_decode_thread_notify.clone())
-            .current_video_timestamp(current_video_timestamp.clone())
             .demux_eof_flag(demux_eof_flag.clone())
             .build();
         let tiny_decoder = RwLock::new(TinyDecoder::new(tiny_decoder_creation_args)?);
@@ -129,8 +126,8 @@ pub struct MediaSourceInfo {
     pub transcoder_args: Option<TranscoderArgs>,
     pub stream_existence_flags: StreamExistenceFlags,
     pub end_timestamp: i64,
-    pub end_time_formatted_string: String,
-    pub cover_pic_data: Option<Vec<u8>>,
+    pub end_time_formatted_str: Box<str>,
+    pub cover_pic_data: Option<Box<[u8]>>,
     pub resolution_rect: [u32; 2],
     pub audio_time_base: Rational,
     pub video_time_base: Rational,
