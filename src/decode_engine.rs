@@ -2,18 +2,21 @@
 use std::{
     path::Path,
     ptr::{null, null_mut},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicI64},
-    },
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use anyhow::Context;
 
 use ffmpeg_the_third::{
-    ChannelLayout, Packet, Rational, Stream, codec, ffi::{
-        AV_CHANNEL_LAYOUT_STEREO, AV_NOPTS_VALUE, AVCodecContext, AVHWDeviceType, AVPixelFormat, AVSEEK_FLAG_BACKWARD, AVSampleFormat, SwrContext, av_frame_copy_props, av_hwdevice_ctx_create, av_hwframe_transfer_data, avcodec_get_hw_config, swr_alloc_set_opts2, swr_convert_frame, swr_free, swr_init,
-    }, format::{Sample, sample::Type, stream::Disposition}, frame::{Audio, Video},
+    ChannelLayout, Packet, Rational, Stream, codec,
+    ffi::{
+        AV_CHANNEL_LAYOUT_STEREO, AV_NOPTS_VALUE, AVCodecContext, AVHWDeviceType, AVPixelFormat,
+        AVSEEK_FLAG_BACKWARD, AVSampleFormat, SwrContext, av_frame_copy_props,
+        av_hwdevice_ctx_create, av_hwframe_transfer_data, avcodec_get_hw_config,
+        swr_alloc_set_opts2, swr_convert_frame, swr_free, swr_init,
+    },
+    format::{Sample, sample::Type, stream::Disposition},
+    frame::{Audio, Video},
 };
 
 use flume::{Receiver, Sender};
@@ -90,7 +93,7 @@ pub(crate) struct TinyDecoder {
     video_decode_task_handle: Option<JoinHandle<PlayerResult<()>>>,
     audio_decode_task_handle: Option<JoinHandle<PlayerResult<()>>>,
     hardware_config_flag: Arc<AtomicBool>,
-    cover_pic_data: Option<Vec<u8>>,
+    cover_pic_data: Option<Box<[u8]>>,
     runtime_handle: Handle,
     demux_thread_notify: Arc<Notify>,
     audio_decode_thread_notify: Arc<Notify>,
@@ -98,10 +101,9 @@ pub(crate) struct TinyDecoder {
     media_source_flag: Arc<AtomicBool>,
     cancellation_token: Arc<CancellationToken>,
     demux_eof_flag: Arc<AtomicBool>,
-    end_time_formatted_string: String,
+    end_time_formatted_str: Box<str>,
     stream_existence_flags: StreamExistenceFlags,
     end_timestamp: i64,
-    current_video_timestamp: Arc<AtomicI64>,
 }
 impl TinyDecoder {
     /// init Decoder and new Struct
@@ -122,7 +124,7 @@ impl TinyDecoder {
             video_frame_rect: [0, 0],
             format_duration: 0,
             end_timestamp: 0,
-            end_time_formatted_string: String::new(),
+            end_time_formatted_str: String::new().into_boxed_str(),
             format_input: Arc::new(RwLock::new(None)),
             video_decoder: Arc::new(RwLock::new(None)),
             audio_decoder: Arc::new(RwLock::new(None)),
@@ -141,7 +143,6 @@ impl TinyDecoder {
             video_decode_thread_notify: tiny_decoder_creation_args.video_decode_thread_notify,
             resampler,
             media_source_flag: tiny_decoder_creation_args.media_source_flag,
-            current_video_timestamp: tiny_decoder_creation_args.current_video_timestamp,
             cancellation_token,
             demux_eof_flag: tiny_decoder_creation_args.demux_eof_flag,
         })
@@ -165,7 +166,7 @@ impl TinyDecoder {
         self.video_decode_task_handle = None;
         self.audio_decode_task_handle = None;
         self.demux_task_handle = None;
-        self.end_time_formatted_string = String::new();
+        self.end_time_formatted_str = String::new().into_boxed_str();
         self.end_timestamp = 0;
         self.format_duration = 0;
         *self.format_input.write().await = None;
@@ -234,7 +235,7 @@ impl TinyDecoder {
                 let data = (*avstream_ptr).attached_pic.data;
                 let slice =
                     std::slice::from_raw_parts(data, (*avstream_ptr).attached_pic.size as usize);
-                self.cover_pic_data = Some(slice.to_vec());
+                self.cover_pic_data = Some(slice.to_vec().into_boxed_slice());
             }
         }
 
@@ -397,7 +398,7 @@ impl TinyDecoder {
             transcoder_args,
             stream_existence_flags: self.stream_existence_flags.clone(),
             end_timestamp: self.end_timestamp,
-            end_time_formatted_string: self.end_time_formatted_string.clone(),
+            end_time_formatted_str: self.end_time_formatted_str.clone(),
             cover_pic_data: self.cover_pic_data.clone(),
             resolution_rect: self.video_frame_rect,
             audio_time_base: self.audio_time_base,
@@ -791,12 +792,12 @@ impl TinyDecoder {
                 self.video_stream_index
             }
         };
+        let mut input = self.format_input.write().await;
         // SAFETY:
         // This unsafe block is promised to be safe because
         // the inner operations do not alloc extra memory
         // but perform seek operation
         unsafe {
-            let mut input = self.format_input.write().await;
             info!("seek timestamp:{}", ts);
             if let Some(input) = &mut *input {
                 let res = ffmpeg_the_third::ffi::avformat_seek_file(
@@ -816,10 +817,9 @@ impl TinyDecoder {
         self.video_packet_cache_queue.1.drain();
         self.audio_frame_cache_queue.1.drain();
         self.video_frame_cache_queue.1.drain();
-        self.current_video_timestamp
-            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         self.flush_decoders().await;
+
         self.demux_eof_flag
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.demux_thread_notify.notify_one();
@@ -891,7 +891,7 @@ impl TinyDecoder {
                 format_description::parse_borrowed::<3>("[hour]:[minute]:[second]")
                 && let Ok(s) = time.format(&formatter)
             {
-                self.end_time_formatted_string = s;
+                self.end_time_formatted_str = s.into_boxed_str();
             }
         } else {
             info!("end_time_err");
@@ -1061,7 +1061,6 @@ pub(crate) struct TinyDecoderArgs {
     ),
     audio_decode_thread_notify: Arc<Notify>,
     video_decode_thread_notify: Arc<Notify>,
-    current_video_timestamp: Arc<AtomicI64>,
     demux_eof_flag: Arc<AtomicBool>,
 }
 
