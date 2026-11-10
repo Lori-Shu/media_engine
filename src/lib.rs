@@ -14,7 +14,7 @@ use ffmpeg_the_third::{
 use flume::Receiver;
 use tokio::{
     runtime::Handle,
-    sync::{Notify, RwLock},
+    sync::{Notify, RwLock, RwLockReadGuard},
 };
 
 use crate::decode_engine::{TinyDecoder, TinyDecoderArgs};
@@ -66,14 +66,17 @@ impl MediaEngine {
             background_tasks_notifies,
         }))
     }
-    /// Retrieve the source information, if not specified, returns Err.
-    pub async fn media_source_info(&self) -> anyhow::Result<MediaSourceInfo> {
-        let media_source_info = self.media_source_info.read().await;
-        if let Some(info) = &*media_source_info {
-            Ok(info.clone())
-        } else {
-            Err(anyhow::Error::msg("no source has been loaded"))
-        }
+    /// Attempting retrieving the source information.
+    pub fn try_borrow_media_source_info(
+        &self,
+    ) -> anyhow::Result<RwLockReadGuard<'_, Option<MediaSourceInfo>>> {
+        self.media_source_info
+            .try_read()
+            .map_err(anyhow::Error::from)
+    }
+    /// Retrieve the source information.
+    pub async fn media_source_info(&self) -> RwLockReadGuard<'_, Option<MediaSourceInfo>> {
+        self.media_source_info.read().await
     }
     /// Specify an input source.
     pub async fn reset_input(&self, path: &Path) -> anyhow::Result<()> {

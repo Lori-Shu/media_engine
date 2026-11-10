@@ -160,7 +160,7 @@ impl TinyDecoder {
         *self.audio_decoder.write().await = None;
 
         self.audio_time_base = Rational::new(1, 1);
-        self.free_swr_ctx_async().await;
+        self.free_swr_ctx();
         self.cover_pic_data = None;
         self.cancellation_token = Arc::new(CancellationToken::new());
         self.video_decode_task_handle = None;
@@ -192,113 +192,12 @@ impl TinyDecoder {
             self.cancel_process_tasks().await?;
             self.reset_states().await;
         }
-        let format_input = ffmpeg_the_third::format::input(path)?;
+        let format_input = ManualProtectedInput(ffmpeg_the_third::format::input(path)?);
         info!("input construct finished");
 
-        let mut cover_stream = None;
-        let mut video_stream = None;
-        let mut audio_stream = None;
-        for item in format_input.streams() {
-            let stream_type = item.parameters().medium();
-            if stream_type == ffmpeg_the_third::util::media::Type::Video {
-                if item.disposition() == Disposition::ATTACHED_PIC {
-                    info!("pic stream was found");
-                    cover_stream = Some(ManualProtectedStream(item));
-                } else {
-                    info!("video stream was found");
-                    self.stream_existence_flags.video = true;
-                    video_stream = Some(ManualProtectedStream(item));
-                }
-            } else if stream_type == ffmpeg_the_third::util::media::Type::Audio {
-                if audio_stream.is_none() {
-                    info!("audio stream was found");
-                    self.stream_existence_flags.audio = true;
-                    audio_stream = Some(ManualProtectedStream(item));
-                }
-            } else if stream_type == ffmpeg_the_third::util::media::Type::Attachment {
-                info!("attachment stream was found");
-                cover_stream = Some(ManualProtectedStream(item));
-            }
-        }
-        if audio_stream.is_none() && video_stream.is_none() {
-            info!("no valid stream found");
-        }
-        if let Some(stream) = cover_stream {
-            info!("cover stream found");
-            self.cover_stream_index = stream.0.index();
-            // SAFETY:
-            // This unsafe block is promised to be safe because
-            // the inner operations do not alloc extra memory
-            // but only read and copy the memory of attached_pics
-            unsafe {
-                let avstream_ptr = stream.0.as_ptr();
-                let data = (*avstream_ptr).attached_pic.data;
-                let slice =
-                    std::slice::from_raw_parts(data, (*avstream_ptr).attached_pic.size as usize);
-                self.cover_pic_data = Some(slice.to_vec().into_boxed_slice());
-            }
-        }
-
-        if let Some(stream) = &audio_stream {
-            self.audio_stream_index = stream.0.index();
-            self.audio_time_base = stream.0.time_base();
-            info!("audio time_base==={}", self.audio_time_base);
-        }
-
-        if let Some(stream) = &video_stream {
-            self.video_stream_index = stream.0.index();
-            self.video_time_base = stream.0.time_base();
-            info!("video time_base==={}", self.video_time_base);
-        }
-
-        // format_input.duration() can get the precise duration of the media file
-        // format_input.duration() number unit is us
-        info!("total duration {} us", format_input.duration());
-        let format_duration = format_input.duration();
-        if format_duration == AV_NOPTS_VALUE {
-            self.format_duration = 0;
-        } else {
-            self.format_duration = format_duration;
-        }
-
-        let mut end_ts = AV_NOPTS_VALUE;
-        if let Some(audio_stream) = audio_stream.as_ref() {
-            let audio_duration = audio_stream.0.duration();
-            end_ts = audio_duration;
-        }
-        if let Some(video_stream) = video_stream.as_ref() {
-            let video_duration = video_stream.0.duration();
-            if end_ts == AV_NOPTS_VALUE {
-                end_ts = video_duration;
-            }
-        }
-        if end_ts == AV_NOPTS_VALUE {
-            if format_duration != AV_NOPTS_VALUE {
-                info!("could not find duration in A/V streams, fallback to input duration");
-                let mut temp_ts = i64::MAX;
-                if audio_stream.is_some() {
-                    temp_ts = temp_ts.min(
-                        format_duration * self.audio_time_base.denominator() as i64
-                            / self.audio_time_base.numerator() as i64
-                            / 1000000,
-                    );
-                }
-                if video_stream.is_some() {
-                    temp_ts = temp_ts.min(
-                        format_duration * self.video_time_base.denominator() as i64
-                            / self.video_time_base.numerator() as i64
-                            / 1000000,
-                    );
-                }
-                end_ts = temp_ts;
-            } else {
-                end_ts = 0;
-            }
-        }
-        self.end_timestamp = end_ts;
-        self.end_time_str(end_ts).await;
-
-        if let Some(audio_stream) = audio_stream {
+        let found_streams = self.find_streams(&format_input).await;
+        self.load_metadata(&format_input, &found_streams).await;
+        if let Some(audio_stream) = &found_streams.audio_stream {
             let audio_decoder_ctx =
                 ffmpeg_the_third::codec::Context::from_parameters(audio_stream.0.parameters())?;
 
@@ -357,14 +256,15 @@ impl TinyDecoder {
                 ));
             }
             let resampler = self.alloc_swr_ctx(&audio_decoder, audio_format)?;
-            let mut resampler_guard = self.resampler.write().await;
-            *resampler_guard = Some(resampler);
             {
+                let mut resampler_guard = self.resampler.write().await;
+                *resampler_guard = Some(resampler);
+
                 let mut a_decoder = self.audio_decoder.write().await;
                 *a_decoder = Some(ManualProtectedAudioDecoder(audio_decoder));
             }
         }
-        let transcoder_args = if let Some(video_stream) = video_stream {
+        let transcoder_args = if let Some(video_stream) = &found_streams.video_stream {
             let codec_ctx =
                 ffmpeg_the_third::codec::Context::from_parameters(video_stream.0.parameters())?;
             let video_decoder = self.enable_decoder_hwacc_with_fallback(codec_ctx).await?;
@@ -375,7 +275,7 @@ impl TinyDecoder {
                 width: video_decoder.width(),
                 height: video_decoder.height(),
             };
-            info!("video decode format{:#?}", video_decoder.format());
+            info!("video decode format{:?}", video_decoder.format());
             self.video_frame_rect = [video_decoder.width(), video_decoder.height()];
             {
                 let mut v_decoder = self.video_decoder.write().await;
@@ -388,9 +288,9 @@ impl TinyDecoder {
 
         {
             let mut input = self.format_input.write().await;
-            *input = Some(ManualProtectedInput(format_input));
+            *input = Some(format_input);
         }
-        info!("par init finished!!!");
+        info!("initialzing parameters is finished!!!");
         self.spawn_process_tasks().await;
         self.media_source_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -404,6 +304,118 @@ impl TinyDecoder {
             audio_time_base: self.audio_time_base,
             video_time_base: self.video_time_base,
         })
+    }
+    async fn find_streams<'a>(&mut self, input: &'a ManualProtectedInput) -> FoundStreams<'a> {
+        let mut streams = FoundStreams {
+            audio_stream: None,
+            video_stream: None,
+            cover_stream: None,
+        };
+        for item in input.0.streams() {
+            let stream_type = item.parameters().medium();
+            if item.disposition() == Disposition::ATTACHED_PIC {
+                info!("pic stream was found");
+                streams.cover_stream = Some(ManualProtectedStream(item));
+            } else if stream_type == ffmpeg_the_third::util::media::Type::Video {
+                info!("video stream was found");
+                self.stream_existence_flags.video = true;
+                streams.video_stream = Some(ManualProtectedStream(item));
+            } else if stream_type == ffmpeg_the_third::util::media::Type::Audio {
+                if streams.audio_stream.is_none() {
+                    info!("audio stream was found");
+                    self.stream_existence_flags.audio = true;
+                    streams.audio_stream = Some(ManualProtectedStream(item));
+                }
+            } else if stream_type == ffmpeg_the_third::util::media::Type::Attachment {
+                info!("attachment stream was found");
+                streams.cover_stream = Some(ManualProtectedStream(item));
+            }
+        }
+        streams
+    }
+    async fn load_metadata(
+        &mut self,
+        format_input: &ManualProtectedInput,
+        found_streams: &FoundStreams<'_>,
+    ) {
+        if found_streams.audio_stream.is_none() && found_streams.video_stream.is_none() {
+            warn!("no valid stream found");
+        }
+        if let Some(stream) = &found_streams.cover_stream {
+            info!("cover stream found");
+            self.cover_stream_index = stream.0.index();
+            // SAFETY:
+            // This unsafe block is promised to be safe because
+            // the inner operations do not alloc extra memory
+            // but only read and copy the memory of attached_pics
+            unsafe {
+                let avstream_ptr = stream.0.as_ptr();
+                let data = (*avstream_ptr).attached_pic.data;
+                let slice =
+                    std::slice::from_raw_parts(data, (*avstream_ptr).attached_pic.size as usize);
+                self.cover_pic_data = Some(slice.to_vec().into_boxed_slice());
+            }
+        }
+
+        if let Some(stream) = &found_streams.audio_stream {
+            self.audio_stream_index = stream.0.index();
+            self.audio_time_base = stream.0.time_base();
+            info!("audio time_base==={}", self.audio_time_base);
+        }
+
+        if let Some(stream) = &found_streams.video_stream {
+            self.video_stream_index = stream.0.index();
+            self.video_time_base = stream.0.time_base();
+            info!("video time_base==={}", self.video_time_base);
+        }
+
+        // format_input.duration() can get the precise duration of the media file
+        // format_input.duration() number unit is us
+        info!("total duration {} us", format_input.0.duration());
+        let format_duration = format_input.0.duration();
+        if format_duration == AV_NOPTS_VALUE {
+            self.format_duration = 0;
+        } else {
+            self.format_duration = format_duration;
+        }
+
+        let mut end_ts = AV_NOPTS_VALUE;
+        if let Some(audio_stream) = found_streams.audio_stream.as_ref() {
+            let audio_duration = audio_stream.0.duration();
+            end_ts = audio_duration;
+        }
+        if end_ts == AV_NOPTS_VALUE
+            && let Some(video_stream) = found_streams.video_stream.as_ref()
+        {
+            let video_duration = video_stream.0.duration();
+
+            end_ts = video_duration;
+        }
+        if end_ts == AV_NOPTS_VALUE {
+            if format_duration != AV_NOPTS_VALUE {
+                info!("could not find duration in A/V streams, fallback to input duration");
+                let mut temp_ts = i64::MAX;
+                if found_streams.audio_stream.is_some() {
+                    temp_ts = temp_ts.min(
+                        format_duration * self.audio_time_base.denominator() as i64
+                            / self.audio_time_base.numerator() as i64
+                            / 1000000,
+                    );
+                }
+                if found_streams.video_stream.is_some() {
+                    temp_ts = temp_ts.min(
+                        format_duration * self.video_time_base.denominator() as i64
+                            / self.video_time_base.numerator() as i64
+                            / 1000000,
+                    );
+                }
+                end_ts = temp_ts;
+            } else {
+                end_ts = 0;
+            }
+        }
+        self.end_timestamp = end_ts;
+        self.load_end_time_str(end_ts).await;
     }
     /// the loop of demuxing video file
     async fn demux_input(demux_context: DemuxContext) -> PlayerResult<()> {
@@ -470,9 +482,9 @@ impl TinyDecoder {
     }
     /// transfer hardware frame data to standard frame data
     async fn transfer_hardware_frame(
-        hardware_config: Arc<AtomicBool>,
-        video_frame_tmp: Video,
-    ) -> Video {
+        hardware_config: &AtomicBool,
+        video_frame_tmp: &Video,
+    ) -> PlayerResult<Video> {
         if hardware_config.load(std::sync::atomic::Ordering::Acquire) {
             // SAFETY:
             // This unsafe block is promised to be safe because
@@ -488,10 +500,10 @@ impl TinyDecoder {
                     warn!("hardware frame transfer to software frame err");
                 }
                 av_frame_copy_props(transfered_frame.as_mut_ptr(), video_frame_tmp.as_ptr());
-                return transfered_frame;
+                return Ok(transfered_frame);
             }
         }
-        video_frame_tmp
+        Err(anyhow::Error::msg("hardware acceleration is not enabled"))
     }
     /// the loop of decoding video packet
     async fn decode_video_frame(decode_context: VideoDecodeContext) -> PlayerResult<()> {
@@ -638,22 +650,24 @@ impl TinyDecoder {
                     {
                         let mut video_frame_tmp = ffmpeg_the_third::frame::Video::empty();
                         while decoder.0.receive_frame(&mut video_frame_tmp).is_ok() {
-                            let video_frame = TinyDecoder::transfer_hardware_frame(
-                                decode_context.hardware_config_flag.clone(),
-                                video_frame_tmp,
+                            if let Ok(video_frame) = TinyDecoder::transfer_hardware_frame(
+                                &decode_context.hardware_config_flag,
+                                &video_frame_tmp,
                             )
-                            .await;
+                            .await
+                            {
+                                video_frame_tmp = video_frame;
+                            }
 
                             if decode_context
                                 .video_frame_sender
-                                .send_async(video_frame)
+                                .send_async(video_frame_tmp.clone())
                                 .with_cancellation_token(&decode_context.cancellation_token)
                                 .await
                                 .is_none()
                             {
                                 return Ok(());
                             }
-                            video_frame_tmp = Video::empty();
                         }
                     }
                 } else {
@@ -715,7 +729,6 @@ impl TinyDecoder {
                             {
                                 return Ok(());
                             }
-                            audio_frame_tmp = Audio::empty();
                         }
                     }
                 } else {
@@ -745,42 +758,44 @@ impl TinyDecoder {
             let _demux_entered = demux_span.enter();
             Self::demux_input(demux_context).in_current_span().await
         }));
+        if self.stream_existence_flags.audio {
+            let decode_context = AudioDecodeContext::builder()
+                .audio_decoder(self.audio_decoder.clone())
+                .audio_frame_sender(self.audio_frame_cache_queue.0.clone())
+                .audio_packet_recv(self.audio_packet_cache_queue.1.clone())
+                .audio_decode_thread_notify(self.audio_decode_thread_notify.clone())
+                .demux_thread_notify(self.demux_thread_notify.clone())
+                .resampler(self.resampler.clone())
+                .cancellation_token(self.cancellation_token.clone())
+                .build();
 
-        let decode_context = VideoDecodeContext::builder()
-            .video_decoder(self.video_decoder.clone())
-            .video_frame_sender(self.video_frame_cache_queue.0.clone())
-            .video_packet_recv(self.video_packet_cache_queue.1.clone())
-            .hardware_config_flag(self.hardware_config_flag.clone())
-            .video_decode_thread_notify(self.video_decode_thread_notify.clone())
-            .demux_thread_notify(self.demux_thread_notify.clone())
-            .cancellation_token(self.cancellation_token.clone())
-            .build();
+            self.audio_decode_task_handle = Some(self.runtime_handle.spawn(async move {
+                let span = span!(Level::INFO, "decode");
+                let _entered = span.enter();
+                Self::decode_audio_frame(decode_context)
+                    .in_current_span()
+                    .await
+            }));
+        }
+        if self.stream_existence_flags.video {
+            let decode_context = VideoDecodeContext::builder()
+                .video_decoder(self.video_decoder.clone())
+                .video_frame_sender(self.video_frame_cache_queue.0.clone())
+                .video_packet_recv(self.video_packet_cache_queue.1.clone())
+                .hardware_config_flag(self.hardware_config_flag.clone())
+                .video_decode_thread_notify(self.video_decode_thread_notify.clone())
+                .demux_thread_notify(self.demux_thread_notify.clone())
+                .cancellation_token(self.cancellation_token.clone())
+                .build();
 
-        self.video_decode_task_handle = Some(self.runtime_handle.spawn(async move {
-            let span = span!(Level::INFO, "decode");
-            let _entered = span.enter();
-            Self::decode_video_frame(decode_context)
-                .in_current_span()
-                .await
-        }));
-
-        let decode_context = AudioDecodeContext::builder()
-            .audio_decoder(self.audio_decoder.clone())
-            .audio_frame_sender(self.audio_frame_cache_queue.0.clone())
-            .audio_packet_recv(self.audio_packet_cache_queue.1.clone())
-            .audio_decode_thread_notify(self.audio_decode_thread_notify.clone())
-            .demux_thread_notify(self.demux_thread_notify.clone())
-            .resampler(self.resampler.clone())
-            .cancellation_token(self.cancellation_token.clone())
-            .build();
-
-        self.audio_decode_task_handle = Some(self.runtime_handle.spawn(async move {
-            let span = span!(Level::INFO, "decode");
-            let _entered = span.enter();
-            Self::decode_audio_frame(decode_context)
-                .in_current_span()
-                .await
-        }));
+            self.video_decode_task_handle = Some(self.runtime_handle.spawn(async move {
+                let span = span!(Level::INFO, "decode");
+                let _entered = span.enter();
+                Self::decode_video_frame(decode_context)
+                    .in_current_span()
+                    .await
+            }));
+        }
     }
 
     /// seek the input to a selected timestamp
@@ -823,7 +838,8 @@ impl TinyDecoder {
         self.demux_eof_flag
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.demux_thread_notify.notify_one();
-
+        self.audio_decode_thread_notify.notify_one();
+        self.video_decode_thread_notify.notify_one();
         info!("seek finished!");
     }
     /// stop demux and decode
@@ -870,7 +886,7 @@ impl TinyDecoder {
         }
     }
     /// use the file detail to compute the video duration and make str to inform the user
-    async fn end_time_str(&mut self, end_ts: i64) {
+    async fn load_end_time_str(&mut self, end_ts: i64) {
         let sec_num = {
             if self.stream_existence_flags.audio {
                 end_ts * self.audio_time_base.numerator() as i64
@@ -989,20 +1005,9 @@ impl TinyDecoder {
         }
     }
     fn free_swr_ctx(&self) {
-        let mut resampler = self.resampler.blocking_write();
-        if let Some(mut ctx) = resampler.take() {
-            // SAFETY:
-            // This unsafe block is promised to be safe because
-            // the inner operations do not alloc extra memory
-            // but free the allocated resampler context
-            unsafe {
-                swr_free(&mut ctx.0);
-            }
-        }
-    }
-    async fn free_swr_ctx_async(&self) {
-        let mut resampler = self.resampler.write().await;
-        if let Some(mut ctx) = resampler.take() {
+        if let Ok(mut resampler) = self.resampler.try_write()
+            && let Some(mut ctx) = resampler.take()
+        {
             // SAFETY:
             // This unsafe block is promised to be safe because
             // the inner operations do not alloc extra memory
@@ -1095,4 +1100,9 @@ struct AudioDecodeContext {
     audio_decode_thread_notify: Arc<Notify>,
     resampler: Arc<RwLock<Option<ManualProtectedResampler>>>,
     cancellation_token: Arc<CancellationToken>,
+}
+struct FoundStreams<'a> {
+    audio_stream: Option<ManualProtectedStream<'a>>,
+    video_stream: Option<ManualProtectedStream<'a>>,
+    cover_stream: Option<ManualProtectedStream<'a>>,
 }
