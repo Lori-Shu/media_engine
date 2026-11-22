@@ -7,16 +7,22 @@ For compilation setup, see [ffmpeg-the-third](https://crates.io/crates/ffmpeg-th
 `MediaEngine` requires a [Tokio](https://crates.io/crates/tokio) runtime handle:
 
 ```rust
-let media_path = "world.mkv";
-
-let async_runtime = tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()?;
+let async_runtime = 
+tokio::runtime::Builder::new_multi_thread()
+.enable_all()
+.build()
+.unwrap();
 
 let handle = async_runtime.handle().clone();
-let media_engine = MediaEngine::new(handle)?;
 
-media_engine.reset_input(media_path).await?;
+let res: anyhow::Result<()> = async_runtime.block_on(
+async move {
+    let media_path = "world.mkv";
+    let media_engine = MediaEngine::new(handle)?;
+    let recvs = media_engine
+    .reset_input(Path::new(media_path)).await?;
 
-let audio_frame = media_engine.realtime_status.audio_frame_recv.recv_async().await?;
-let video_frame = media_engine.realtime_status.video_frame_recv.recv_async().await?;
+    let audio_frame = recvs.audio_frame_recv.recv().await?;
+    let video_frame = recvs.video_frame_recv.recv().await?;
+    anyhow::Result::Ok(())
+});

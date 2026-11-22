@@ -5,16 +5,16 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+use crossfire::{AsyncRx, spsc::Array};
 use ffmpeg_the_third::{
     Rational,
     color::{Space, TransferCharacteristic},
     format::Pixel,
     frame::{Audio, Video},
 };
-use flume::Receiver;
 use tokio::{
     runtime::Handle,
-    sync::{Notify, RwLock, RwLockReadGuard},
+    sync::{RwLock, RwLockReadGuard},
 };
 
 use crate::decode_engine::{TinyDecoder, TinyDecoderArgs};
@@ -25,45 +25,29 @@ pub struct MediaEngine {
     tiny_decoder: RwLock<TinyDecoder>,
     media_source_info: RwLock<Option<MediaSourceInfo>>,
     pub realtime_status: RealtimeStatus,
-    pub background_tasks_notifies: BackgroundTasksNotifies,
 }
 impl MediaEngine {
     /// Construct an engine without specifing a source.
     pub fn new(handle: Handle) -> anyhow::Result<Arc<Self>> {
         let media_source_flag = Arc::new(AtomicBool::new(false));
         let hardware_config_flag = Arc::new(AtomicBool::new(false));
-        let audio_frame_cache_queue = flume::bounded(32);
-        let video_frame_cache_queue = flume::bounded(32);
-        let audio_decode_thread_notify = Arc::new(Notify::new());
-        let video_decode_thread_notify = Arc::new(Notify::new());
         let demux_eof_flag = Arc::new(AtomicBool::new(false));
         let tiny_decoder_creation_args = TinyDecoderArgs::builder()
             .runtime_handle(handle)
             .media_source_flag(media_source_flag.clone())
             .hardware_config_flag(hardware_config_flag.clone())
-            .audio_frame_cache_queue(audio_frame_cache_queue.clone())
-            .video_frame_cache_queue(video_frame_cache_queue.clone())
-            .audio_decode_thread_notify(audio_decode_thread_notify.clone())
-            .video_decode_thread_notify(video_decode_thread_notify.clone())
             .demux_eof_flag(demux_eof_flag.clone())
             .build();
         let tiny_decoder = RwLock::new(TinyDecoder::new(tiny_decoder_creation_args)?);
         let realtime_status = RealtimeStatus {
             media_source_flag,
-            audio_frame_recv: audio_frame_cache_queue.1,
-            video_frame_recv: video_frame_cache_queue.1,
             demux_eof_flag,
             hardware_config_flag,
-        };
-        let background_tasks_notifies = BackgroundTasksNotifies {
-            audio_decode_thread_notify,
-            video_decode_thread_notify,
         };
         Ok(Arc::new(Self {
             tiny_decoder,
             media_source_info: RwLock::new(None),
             realtime_status,
-            background_tasks_notifies,
         }))
     }
     /// Attempting retrieving the source information.
@@ -79,11 +63,11 @@ impl MediaEngine {
         self.media_source_info.read().await
     }
     /// Specify an input source.
-    pub async fn reset_input(&self, path: &Path) -> anyhow::Result<()> {
+    pub async fn reset_input(&self, path: &Path) -> anyhow::Result<FrameReceivers> {
         let mut decoder = self.tiny_decoder.write().await;
-        if let Ok(info) = decoder.reset_input(path).await {
+        if let Ok((info, recvs)) = decoder.reset_input(path).await {
             *self.media_source_info.write().await = Some(info);
-            Ok(())
+            Ok(recvs)
         } else {
             Err(anyhow::Error::msg("reset input err"))
         }
@@ -113,16 +97,10 @@ pub struct TranscoderArgs {
 /// Shared realtime states.
 pub struct RealtimeStatus {
     pub media_source_flag: Arc<AtomicBool>,
-    pub audio_frame_recv: Receiver<Audio>,
-    pub video_frame_recv: Receiver<Video>,
     pub demux_eof_flag: Arc<AtomicBool>,
     pub hardware_config_flag: Arc<AtomicBool>,
 }
-/// Notifies for waking background tasks.
-pub struct BackgroundTasksNotifies {
-    pub audio_decode_thread_notify: Arc<Notify>,
-    pub video_decode_thread_notify: Arc<Notify>,
-}
+
 /// Souce information, only exist after calling reset_input.
 #[derive(Clone)]
 pub struct MediaSourceInfo {
@@ -134,4 +112,36 @@ pub struct MediaSourceInfo {
     pub resolution_rect: [u32; 2],
     pub audio_time_base: Rational,
     pub video_time_base: Rational,
+}
+pub struct FrameReceivers {
+    pub audio_frame_recv: AsyncRx<Array<Audio>>,
+    pub video_frame_recv: AsyncRx<Array<Video>>,
+}
+#[allow(unused)]
+mod test {
+    use std::path::Path;
+
+    use tokio::task::JoinHandle;
+
+    use crate::MediaEngine;
+
+    #[test]
+    fn hello_world() {
+        let async_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let handle = async_runtime.handle().clone();
+
+        let res: anyhow::Result<()> = async_runtime.block_on(async move {
+            let media_path = "world.mkv";
+            let media_engine = MediaEngine::new(handle)?;
+            let recvs = media_engine.reset_input(Path::new(media_path)).await?;
+
+            let audio_frame = recvs.audio_frame_recv.recv().await?;
+            let video_frame = recvs.video_frame_recv.recv().await?;
+            anyhow::Result::Ok(())
+        });
+    }
 }
