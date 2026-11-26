@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+use anyhow::Context;
 use crossfire::{AsyncRx, spsc::Array};
 use ffmpeg_the_third::{
     Rational,
@@ -56,7 +57,7 @@ impl MediaEngine {
     ) -> anyhow::Result<RwLockReadGuard<'_, Option<MediaSourceInfo>>> {
         self.media_source_info
             .try_read()
-            .map_err(anyhow::Error::from)
+            .context("failing to try_borrow_media_source_info")
     }
     /// Retrieve the source information.
     pub async fn media_source_info(&self) -> RwLockReadGuard<'_, Option<MediaSourceInfo>> {
